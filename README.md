@@ -7,3 +7,12 @@ This sample builds on the PyTorch3D model reconstruction tutorial, except the me
 
 # Pose Estimation
 This sample builds on the PyTorch3D camera pose optimization tutorial, except the method uses depth and silhouette along with pose perturbation. 
+
+# Installation
+One can start from the following [repository](https://github.com/82magnolia/changeoscopy/tree/main).
+Then, run the following command.
+
+```
+pip install -r requirements.txt
+pip install --upgrade "jax[cuda11_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+```
