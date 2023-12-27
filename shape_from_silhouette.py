@@ -90,17 +90,33 @@ if __name__ == '__main__':
 
     height, width = image_size
     K = np.array([[focal_length, 0, cx], [0, focal_length, cy], [0, 0, 1]])
-    pixel_list = (np.array(np.meshgrid(np.arange(width), height - np.arange(height) - 1, [0]))[:, :, :, 0]).reshape((3, -1)).T
+    if 'pyrender' in sil_dir:
+        pixel_list = (np.array(np.meshgrid(np.arange(width), height - np.arange(height) - 1, [0]))[:, :, :, 0]).reshape((3, -1)).T
+    else:
+        pixel_list = (np.array(np.meshgrid(width - np.arange(width) - 1, height - np.arange(height) - 1, [0]))[:, :, :, 0]).reshape((3, -1)).T
     camera_rays = (pixel_list - K[:, 2])/np.diag(K)
-    camera_rays[:, -1] = -1
+
+    if 'pyrender' in sil_dir:
+        camera_rays[:, -1] = -1
+    else:
+        camera_rays[:, -1] = 1
     cameras_list = []
     for tran, rot in zip(pose_dict['T'], pose_dict['R']):
-        camera_rays2 = camera_rays @ rot
-        t = np.tile(tran[None], (camera_rays2.shape[0], 1))
+        if 'pyrender' in sil_dir:
+            camera_rays2 = camera_rays @ rot
+            t = np.tile(tran[None], (camera_rays2.shape[0], 1))
+        else:
+            cam_center = - tran @ rot.T
+            camera_rays2 = camera_rays @ rot.T  # PyTorch3D World-Cam: X' = X @ R + T (this is inverse, cam to world)
+            t = np.tile(cam_center[None], (camera_rays2.shape[0], 1))
 
         rays_trans = np.stack([camera_rays2, t], 1)
         cameras_list.append(rays_trans)
+    cam_center = np.concatenate([cameras_list[i][:, 1] for i in range(len(cameras_list))], axis=0)
+    cam_screen = np.concatenate([cameras_list[i][:, 1] + cameras_list[i][:, 0] for i in range(len(cameras_list))], axis=0)
 
+    # np.savetxt('test_center.txt', cam_center)
+    # np.savetxt('test_screen.txt', cam_screen)
     # Initial rendering
     alpha_results_rand = []
     alpha_results_rand_depth = []
