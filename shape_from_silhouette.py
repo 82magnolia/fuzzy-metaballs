@@ -1,11 +1,7 @@
 import argparse
 import os
-import sys
-import torch
 import numpy as np
 import trimesh
-import pyrender
-import transforms3d
 from tqdm import tqdm
 from glob import glob
 import cv2
@@ -15,6 +11,8 @@ import fm_render
 from jax.example_libraries import optimizers
 from util import DegradeLR
 from numpy import random
+from pytorch3d.io import load_objs_as_meshes
+import torch
 
 
 def sfs_objective(params, true_alpha):
@@ -74,9 +72,11 @@ if __name__ == '__main__':
     beta3 = jnp.float32(np.exp(hyperparams[1]))
     gmm_init_scale = 1
     render_jit = jax.jit(fm_render.render_func_rays)
-    mesh_tri = trimesh.load(args.mesh_file)
-    shape_scale = float(mesh_tri.vertices[0].std(0).mean()) * 3
-    center = np.array(mesh_tri.vertices.mean(0))
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    pt3d_mesh = load_objs_as_meshes([args.mesh_file], device=device)
+    verts_arr = pt3d_mesh.verts_packed().cpu().numpy()
+    shape_scale = float(verts_arr.std(0).mean())*3
+    center = np.array(verts_arr.mean(0))
 
     # this balances covariance and mean optimization due to using Adam
     opt_shape_scale = 2.2
@@ -90,33 +90,20 @@ if __name__ == '__main__':
 
     height, width = image_size
     K = np.array([[focal_length, 0, cx], [0, focal_length, cy], [0, 0, 1]])
-    if 'pyrender' in sil_dir:
-        pixel_list = (np.array(np.meshgrid(np.arange(width), height - np.arange(height) - 1, [0]))[:, :, :, 0]).reshape((3, -1)).T
-    else:
-        pixel_list = (np.array(np.meshgrid(width - np.arange(width) - 1, height - np.arange(height) - 1, [0]))[:, :, :, 0]).reshape((3, -1)).T
+    pixel_list = (np.array(np.meshgrid(width - np.arange(width) - 1, height - np.arange(height) - 1, [0]))[:, :, :, 0]).reshape((3, -1)).T
     camera_rays = (pixel_list - K[:, 2])/np.diag(K)
-
-    if 'pyrender' in sil_dir:
-        camera_rays[:, -1] = -1
-    else:
-        camera_rays[:, -1] = 1
+    camera_rays[:, -1] = 1
     cameras_list = []
     for tran, rot in zip(pose_dict['T'], pose_dict['R']):
-        if 'pyrender' in sil_dir:
-            camera_rays2 = camera_rays @ rot
-            t = np.tile(tran[None], (camera_rays2.shape[0], 1))
-        else:
-            cam_center = - tran @ rot.T
-            camera_rays2 = camera_rays @ rot.T  # PyTorch3D World-Cam: X' = X @ R + T (this is inverse, cam to world)
-            t = np.tile(cam_center[None], (camera_rays2.shape[0], 1))
+        cam_center = - tran @ rot.T
+        camera_rays2 = camera_rays @ rot.T  # PyTorch3D World-Cam: X' = X @ R + T (this is inverse, cam to world)
+        t = np.tile(cam_center[None], (camera_rays2.shape[0], 1))
 
         rays_trans = np.stack([camera_rays2, t], 1)
         cameras_list.append(rays_trans)
     cam_center = np.concatenate([cameras_list[i][:, 1] for i in range(len(cameras_list))], axis=0)
     cam_screen = np.concatenate([cameras_list[i][:, 1] + cameras_list[i][:, 0] for i in range(len(cameras_list))], axis=0)
 
-    # np.savetxt('test_center.txt', cam_center)
-    # np.savetxt('test_screen.txt', cam_screen)
     # Initial rendering
     alpha_results_rand = []
     alpha_results_rand_depth = []

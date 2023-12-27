@@ -1,8 +1,6 @@
 import argparse
 import os
 import numpy as np
-import trimesh
-import pyrender
 import transforms3d
 from tqdm import tqdm
 import time
@@ -46,11 +44,14 @@ if __name__ == '__main__':
         os.makedirs(sil_image_dir)
 
     if args.mesh_file is not None:  # Generate images from mesh
-        mesh_tri = trimesh.load(args.mesh_file)
+        # Load mesh in PyTorch3D format
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        pt3d_mesh = load_objs_as_meshes([args.mesh_file], device=device)
+        verts_arr = pt3d_mesh.verts_packed().cpu().numpy()
 
         # seems sane to fetch/estimate scale
-        shape_scale = float(mesh_tri.vertices.std(0).mean())*3
-        center = np.array(mesh_tri.vertices.mean(0))
+        shape_scale = float(verts_arr.std(0).mean())*3
+        center = np.array(verts_arr.mean(0))
 
         num_views = args.num_views
         image_size = args.image_size
@@ -77,29 +78,20 @@ if __name__ == '__main__':
 
         rand_quats = rand_quats / np.linalg.norm(rand_quats, axis=1, keepdims=True)
 
-        mesh = pyrender.Mesh.from_trimesh(mesh_tri)
-
-        # Load mesh in PyTorch3D format
-        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        pt3d_mesh = load_objs_as_meshes([args.mesh_file], device=device)
-
-        scene = pyrender.Scene()
-        scene.add(mesh)
-
+        # Dictionary for saving poses
         pose_dict = {'K': None, 'R': [], 'T': []}
 
         # Setup camera
-        camera = pyrender.IntrinsicsCamera(focal_length, focal_length, cx, cy, znear=0.1 * shape_scale, zfar=100 * shape_scale)
-        pt3d_cameras = FoVPerspectiveCameras(device=device, znear=camera.znear, zfar=camera.zfar,
+        pt3d_cameras = FoVPerspectiveCameras(device=device, znear=0.1 * shape_scale, zfar=100 * shape_scale,
             fov=vfov_degrees, aspect_ratio=image_size[1] / image_size[0], degrees=True)
         cam_intrinsics = pt3d_cameras.compute_projection_matrix(pt3d_cameras.znear, pt3d_cameras.zfar, pt3d_cameras.fov,
             pt3d_cameras.aspect_ratio, pt3d_cameras.degrees).cpu().numpy()
         pose_dict['K'] = cam_intrinsics
 
         raster_settings = RasterizationSettings(
-            image_size=image_size, 
-            blur_radius=0.0, 
-            faces_per_pixel=1, 
+            image_size=image_size,
+            blur_radius=0.0,
+            faces_per_pixel=1,
         )
         lights = PointLights(device=device, location=[[0.0, 0.0, -3.0]])
 
@@ -120,42 +112,16 @@ if __name__ == '__main__':
         for q_idx, quat in tqdm(enumerate(rand_quats), desc="Generating views", total=len(rand_quats)):
             R = transforms3d.quaternions.quat2mat(quat)
             loc = np.array([0, 0, 3 * shape_scale]) @ R + center  # Camera center
-            pt3d_rot = R
-            pt3d_loc = np.array([0, 0, 3 * shape_scale]) @ pt3d_rot + center  # Camera center
-            align_rot = np.eye(3)  # np.array([[0., 1., 0.], [1., 0., 0.], [0., 0., -1.]])
-            pt3d_loc = pt3d_loc @ align_rot
-            pt3d_center = center @ align_rot
-            # pt3d_loc[0] *= -1.
-            # pt3d_loc[1] *= -1.
-            cam_rot, cam_trans = look_at_view_transform(dist=3 * shape_scale, at=pt3d_center.reshape(1, 3),
-                eye=pt3d_loc.reshape(1, 3), device=device)
 
-            # Convert to pyrender rotations (PyTorch3D -> OpenGL = PyRender)
-            pyr_R = cam_rot.squeeze().cpu().numpy() @ np.array([[-1., 0., 0.], [0., 1., 0.], [0., 0., -1.]])
+            # Look-at rotations and translations (object-centric views)
+            cam_rot, cam_trans = look_at_view_transform(dist=3 * shape_scale, at=center.reshape(1, 3),
+                eye=loc.reshape(1, 3), device=device)
 
             pose = np.vstack([np.vstack([R, loc]).T, np.array([0, 0, 0, 1])])
 
-            # Render in pyrender
-            light = pyrender.SpotLight(color=np.ones(3), intensity=50.0, innerConeAngle=np.pi / 16.0, outerConeAngle=np.pi / 6.0)
-            scene.add(light, pose=pose)
-
-            scene.add(camera, pose=pose)
-
-            r = pyrender.OffscreenRenderer(image_size[1], image_size[0])
-            color, target_depth = r.render(scene)
-            target_depth[target_depth == 0] = np.nan
-            sil = (~np.isnan(target_depth))
-            
-            for node in list(scene.light_nodes):
-                scene.remove_node(node)
-                time.sleep(0.01)
-            for node in list(scene.camera_nodes):
-                scene.remove_node(node)
-                time.sleep(0.01)
-
             # Render in Pytorch3D
-            pt3d_cameras.R = cam_rot  # torch.from_numpy(pt3d_rot.T).unsqueeze(0).to(device)
-            pt3d_cameras.T[0] = cam_trans  # torch.from_numpy(cam_trans).to(device)
+            pt3d_cameras.R = cam_rot
+            pt3d_cameras.T[0] = cam_trans
 
             renderer.rasterizer.transform(pt3d_mesh, cameras=pt3d_cameras)
             pt3d_render_result = renderer(pt3d_mesh, lights=lights)
@@ -164,18 +130,11 @@ if __name__ == '__main__':
             alpha = pt3d_render_result[0][..., 3].cpu().numpy()
             pt3d_sil = (alpha != 0.)
 
-            if render_mode == 'pyrender':
-                pose_dict['T'].append(loc)
-                pose_dict['R'].append(R)
+            pose_dict['T'].append(cam_trans.squeeze().cpu().numpy())
+            pose_dict['R'].append(cam_rot.squeeze().cpu().numpy())
 
-                cv2.imwrite(os.path.join(image_dir, f'image-{q_idx:04d}.jpg'), cv2.cvtColor(color, cv2.COLOR_BGR2RGB))
-                cv2.imwrite(os.path.join(sil_image_dir, f'sil-{q_idx:04d}.jpg'), sil.astype(np.uint8) * 255)
-            else:
-                pose_dict['T'].append(cam_trans.squeeze().cpu().numpy())
-                pose_dict['R'].append(cam_rot.squeeze().cpu().numpy())
-
-                cv2.imwrite(os.path.join(image_dir, f'image-{q_idx:04d}.jpg'), cv2.cvtColor(images, cv2.COLOR_BGR2RGB))
-                cv2.imwrite(os.path.join(sil_image_dir, f'sil-{q_idx:04d}.jpg'), pt3d_sil.astype(np.uint8) * 255)
+            cv2.imwrite(os.path.join(image_dir, f'image-{q_idx:04d}.jpg'), cv2.cvtColor(images, cv2.COLOR_BGR2RGB))
+            cv2.imwrite(os.path.join(sil_image_dir, f'sil-{q_idx:04d}.jpg'), pt3d_sil.astype(np.uint8) * 255)
 
         pose_dict['R'] = np.stack(pose_dict['R'], axis=0)
         pose_dict['T'] = np.stack(pose_dict['T'], axis=0)
