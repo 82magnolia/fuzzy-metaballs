@@ -111,6 +111,24 @@ if __name__ == '__main__':
             pt3d_cameras.aspect_ratio, pt3d_cameras.degrees).cpu().numpy()
         pose_dict['K'] = cam_intrinsics
 
+        # Extract screen space intrinsics for use in DROID-SLAM coordinate frame
+        screen_cam_intrinsics = np.zeros_like(cam_intrinsics[0][:3, :3])
+
+        img_h, img_w = image_size
+        ndc_focal_length = cam_intrinsics[0][0, 0]
+        screen_focal_length = ndc_focal_length * min(img_h, img_w) / 2
+        screen_px = img_w / 2 - cam_intrinsics[0][0, 2] * min(img_h, img_w) / 2
+        screen_py = img_h / 2 - cam_intrinsics[0][1, 2] * min(img_h, img_w) / 2
+        screen_cam_intrinsics[0, 0] = screen_focal_length
+        screen_cam_intrinsics[1, 1] = screen_focal_length
+        screen_cam_intrinsics[0, 2] = screen_px
+        screen_cam_intrinsics[1, 2] = screen_py
+        screen_cam_intrinsics[2, 2] = 1.
+
+        # Save intrinsics for use in DROID-SLAM
+        with open(os.path.join(data_dir, 'droid_slam_intrinsics.txt'), 'w') as f:
+            f.write(f"{screen_cam_intrinsics[0, 0]} {screen_cam_intrinsics[1, 1]} {screen_cam_intrinsics[0, 2]} {screen_cam_intrinsics[1, 2]}")
+
         raster_settings = RasterizationSettings(
             image_size=image_size,
             blur_radius=0.0,
