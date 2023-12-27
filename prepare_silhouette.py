@@ -16,14 +16,19 @@ from pytorch3d.renderer import (
 from pytorch3d.renderer.cameras import look_at_view_transform
 from pytorch3d.io import load_objs_as_meshes
 import torch
+from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import Slerp
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_root", help="Root directory for saving images and poses")
     parser.add_argument("--mesh_file", help="Mesh file to use for creating silhouettes", default=None, type=str)
-    parser.add_argument("--num_views", help="Number of views to use for generating silhouettes", default=20, type=int)
-    parser.add_argument("--image_size", help="Size of image in height, width", type=list, default=[64, 64], nargs=2)
+    parser.add_argument("--num_views", help="Number of views to use for generating silhouettes if view_type is random", default=20, type=int)
+    parser.add_argument("--num_view_per_wp", help="Number of views to use for generating silhouettes if view_type is continuous", default=30, type=int)
+    parser.add_argument("--image_size", help="Size of image in height, width", type=int, default=[64, 64], nargs=2)
+    parser.add_argument("--view_type", help="Type of views to make for shape from silhouettes", default="random")
+    parser.add_argument("--num_waypoints", help="Number of waypoints to make if view_type is continous", default=4, type=int)
     parser.add_argument("--vfov_degrees", help="Vertical field of view in degrees", type=float, default=45)
     parser.add_argument("--rand_perturb", help="If True, randomly perturb pose around each uniformly sampled pose", action='store_true')
     parser.add_argument("--rand_perturb_count", help="Number of random perturbations to make per pose", default=20, type=int)
@@ -53,7 +58,6 @@ if __name__ == '__main__':
         shape_scale = float(verts_arr.std(0).mean())*3
         center = np.array(verts_arr.mean(0))
 
-        num_views = args.num_views
         image_size = args.image_size
         vfov_degrees = args.vfov_degrees
 
@@ -66,17 +70,36 @@ if __name__ == '__main__':
         cy = (image_size[0] - 1) / 2
 
         np.random.seed(42)
-        rand_quats = np.random.randn(num_views, 4)
+        if args.view_type == 'continuous':
+            num_waypoints = args.num_waypoints
+            num_view_per_wp = args.num_view_per_wp
+            waypoint_quats = np.random.randn(num_waypoints, 4)
+            waypoint_sp_quats = Rotation.from_quat(waypoint_quats)
+            view_quats = []
+            for idx in range(len(waypoint_sp_quats)):
+                if idx != len(waypoint_sp_quats) - 1:
+                    wps = waypoint_sp_quats[idx: idx + 2]
+                else:
+                    wps = Rotation.concatenate([waypoint_sp_quats[-1], waypoint_sp_quats[0]])
+                key_times = np.array([0, 1])
+                slerp_op = Slerp(key_times, wps)
+                times = np.linspace(0, 1, num_view_per_wp)
+                slerp_quats = slerp_op(times)
+                view_quats.append(slerp_quats.as_quat()[:-1])
+            view_quats = np.concatenate(view_quats, axis=0)
+        else:
+            num_views = args.num_views
+            view_quats = np.random.randn(num_views, 4)
 
         # Optionally perturb around current set of views
         rand_perturb_count = args.rand_perturb_count
         rand_perturb_scale = args.rand_perturb_scale
         rand_perturb = args.rand_perturb
         if rand_perturb:
-            rand_quats = rand_quats[:, None, :] + np.random.randn(rand_perturb_count, 4)[None, :, :] * rand_perturb_scale
-            rand_quats = rand_quats.reshape(-1, 4)
+            view_quats = view_quats[:, None, :] + np.random.randn(rand_perturb_count, 4)[None, :, :] * rand_perturb_scale
+            view_quats = view_quats.reshape(-1, 4)
 
-        rand_quats = rand_quats / np.linalg.norm(rand_quats, axis=1, keepdims=True)
+        view_quats = view_quats / np.linalg.norm(view_quats, axis=1, keepdims=True)
 
         # Dictionary for saving poses
         pose_dict = {'K': None, 'R': [], 'T': []}
@@ -109,7 +132,7 @@ if __name__ == '__main__':
 
         render_mode = 'pytorch'
 
-        for q_idx, quat in tqdm(enumerate(rand_quats), desc="Generating views", total=len(rand_quats)):
+        for q_idx, quat in tqdm(enumerate(view_quats), desc="Generating views", total=len(view_quats)):
             R = transforms3d.quaternions.quat2mat(quat)
             loc = np.array([0, 0, 3 * shape_scale]) @ R + center  # Camera center
 
