@@ -179,17 +179,23 @@ if __name__ == '__main__':
             cv2.imwrite(os.path.join(image_dir, f'image-{q_idx:04d}.jpg'), cv2.cvtColor(images, cv2.COLOR_BGR2RGB))
             cv2.imwrite(os.path.join(sil_image_dir, f'sil-{q_idx:04d}.jpg'), pt3d_sil.astype(np.uint8) * 255)
 
-            if args.add_symmetry:
-                sym_trans = -cam_trans.squeeze().cpu().numpy() @ cam_rot.squeeze().cpu().numpy().T @ cam_rot.squeeze().cpu().numpy().T \
-                    - 2 * center @ cam_rot.squeeze().cpu().numpy().T
+            if args.add_symmetry:  # Add 180-deg rotation on z-axis (opposite facing camera)
+                Rz = np.array([[-1., 0., 0.], [0., 1., 0.], [0., 0., -1.]])
+                sym_trans = -cam_trans.squeeze().cpu().numpy() @ Rz \
+                    - 2 * center @ cam_rot.squeeze().cpu().numpy() @ Rz
                 sym_pose_dict['T'].append(sym_trans)
-                sym_pose_dict['R'].append(cam_rot.squeeze().cpu().numpy().T)
+                sym_pose_dict['R'].append(cam_rot.squeeze().cpu().numpy() @ Rz)
 
-                sym_images = np.flip(np.flip(images, axis=1), axis=0)
-                sym_sil = np.flip(np.flip(pt3d_sil, axis=1), axis=0)
+                sym_images = np.flip(images, axis=1)
+                sym_sil = np.flip(pt3d_sil, axis=1)
+
                 cv2.imwrite(os.path.join(image_dir, f'image-{len(view_quats) + q_idx:04d}.jpg'), cv2.cvtColor(sym_images, cv2.COLOR_BGR2RGB))
                 cv2.imwrite(os.path.join(sil_image_dir, f'sil-{len(view_quats) + q_idx:04d}.jpg'), sym_sil.astype(np.uint8) * 255)
 
-        pose_dict['R'] = np.stack(pose_dict['R'], axis=0)
-        pose_dict['T'] = np.stack(pose_dict['T'], axis=0)
+        if args.add_symmetry:
+            pose_dict['R'] = np.stack(pose_dict['R'] + sym_pose_dict['R'], axis=0)
+            pose_dict['T'] = np.stack(pose_dict['T'] + sym_pose_dict['T'], axis=0)
+        else:
+            pose_dict['R'] = np.stack(pose_dict['R'], axis=0)
+            pose_dict['T'] = np.stack(pose_dict['T'], axis=0)
         np.savez(os.path.join(data_dir, 'sil_pose.npz'), **pose_dict)
