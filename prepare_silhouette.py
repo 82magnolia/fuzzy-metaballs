@@ -33,7 +33,8 @@ if __name__ == '__main__':
     parser.add_argument("--rand_perturb", help="If True, randomly perturb pose around each uniformly sampled pose", action='store_true')
     parser.add_argument("--rand_perturb_count", help="Number of random perturbations to make per pose", default=20, type=int)
     parser.add_argument("--rand_perturb_scale", help="Scale of random perturbations to make", default=0.1, type=float)
-    
+    parser.add_argument("--add_symmetry", help="If True, additionally render the approximate point symmetry silhouette", action='store_true')
+
     args = parser.parse_args()
 
     data_dir = args.data_root
@@ -148,7 +149,8 @@ if __name__ == '__main__':
             )
         )
 
-        render_mode = 'pytorch'
+        if args.add_symmetry:
+            sym_pose_dict = {'R': [], 'T': []}
 
         for q_idx, quat in tqdm(enumerate(view_quats), desc="Generating views", total=len(view_quats)):
             R = transforms3d.quaternions.quat2mat(quat)
@@ -176,6 +178,17 @@ if __name__ == '__main__':
 
             cv2.imwrite(os.path.join(image_dir, f'image-{q_idx:04d}.jpg'), cv2.cvtColor(images, cv2.COLOR_BGR2RGB))
             cv2.imwrite(os.path.join(sil_image_dir, f'sil-{q_idx:04d}.jpg'), pt3d_sil.astype(np.uint8) * 255)
+
+            if args.add_symmetry:
+                sym_trans = -cam_trans.squeeze().cpu().numpy() @ cam_rot.squeeze().cpu().numpy().T @ cam_rot.squeeze().cpu().numpy().T \
+                    - 2 * center @ cam_rot.squeeze().cpu().numpy().T
+                sym_pose_dict['T'].append(sym_trans)
+                sym_pose_dict['R'].append(cam_rot.squeeze().cpu().numpy().T)
+
+                sym_images = np.flip(np.flip(images, axis=1), axis=0)
+                sym_sil = np.flip(np.flip(pt3d_sil, axis=1), axis=0)
+                cv2.imwrite(os.path.join(image_dir, f'image-{len(view_quats) + q_idx:04d}.jpg'), cv2.cvtColor(sym_images, cv2.COLOR_BGR2RGB))
+                cv2.imwrite(os.path.join(sil_image_dir, f'sil-{len(view_quats) + q_idx:04d}.jpg'), sym_sil.astype(np.uint8) * 255)
 
         pose_dict['R'] = np.stack(pose_dict['R'], axis=0)
         pose_dict['T'] = np.stack(pose_dict['T'], axis=0)
