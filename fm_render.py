@@ -57,55 +57,103 @@ def quat_to_rot(q):
     R2 = jnp.eye(3)
     return jnp.where(Nq > 1e-12,R1,R2)
 
-
+# core rendering function
 def render_func_rays(means, prec_full, weights_log, camera_starts_rays, beta_2, beta_3):
+    # precision is fully parameterized by triangle matrix
+    # we use upper triangle for compatibilize with sklearn
     prec = jnp.triu(prec_full)
-    # weights = jnp.exp(weights_log)
-    # weights = weights/weights.sum()
 
+    # if doing normalized weights for proper GMM
+    # typically not used for shape reconstruction
+    #weights = jnp.exp(weights_log)
+    #weights = weights/weights.sum()
+
+    # gets run per gaussian with [precision, log(weight), mean]
     def perf_idx(prcI,w,meansI):
+        # math is easier with lower triangle
         prc = prcI.T
-        #div = jnp.prod(jnp.diag(jnp.abs(prc))) + 1e-20
 
+        # gaussian scale
+        # could be useful for log likelihood but not used here
+        div = jnp.prod(jnp.diag(jnp.abs(prc))) + 1e-20
+        
+        # gets run per ray
         def perf_ray(r_t):
+            # unpack the ray (r) and position (t)
             r = r_t[0]
             t = r_t[1]
-            p =  meansI -t 
+            
+            # shift the mean to be relative to ray start
+            p =  meansI - t
 
+            # compute \sigma^{-0.5} p, which is reused
             projp = prc @ p
+
+            # compute v^T \sigma^{-1} v
             vsv = ((prc @ r)**2).sum()
+
+            # compute p^T \sigma^{-1} v
             psv = ((projp) * (prc@r)).sum()
+
+            # compute the surface normal as \sigma^{-1} p
             projp2 = prc.T @ projp
 
-            # linear
+            # distance to get maximum likelihood point for this gaussian
+            # scale here is based on r! 
+            # if r = [x, y, 1], then depth. if ||r|| = 1, then distance
             res = (psv)/(vsv)
             
+            # get the intersection point
             v = r * res - p
 
-            d0 = ((prc @ v)**2).sum()
+            # compute intersection's unnormalized Gaussian log likelihood
+            d0 = ((prc @ v)**2).sum()# + 3*jnp.log(jnp.pi*2)
+            
+            # multiply by the weight
             d2 = -0.5*d0 + w
-            #d3 =  d2 + jnp.log(div)
+            
+            # if you wanted real probability
+            #d3 =  d2 + jnp.log(div) #+ 3*jnp.log(res)
 
+            # compute a normalized normal
             norm_est = projp2/jnp.linalg.norm(projp2)
             norm_est = jnp.where(r@norm_est < 0,norm_est,-norm_est)
-            return res,d2,norm_est
-        return jax.vmap((perf_ray))(camera_starts_rays) 
 
-    zs,stds,projp = jax.vmap(perf_idx)(prec,weights_log,means)  # jit perf
+            # return ray distance, gaussian distance, normal
+            return res, d2, norm_est
+        
+        # runs parallel for each ray across each gaussian
+        res,d2,projp  = jax.vmap((perf_ray))(camera_starts_rays)
 
-    est_alpha = 1-jnp.exp(-jnp.exp(stds).sum(0) ) # simplier but splottier
+        return res, d2,projp
+    
+    # runs parallel for gaussian
+    zs,stds,projp = jax.vmap(perf_idx)(prec,weights_log,means) 
+
+    # alpha is based on distance from all gaussians
+    est_alpha = 1-jnp.exp(-jnp.exp(stds).sum(0) )
+
+    # points behind camera should be zero
+    # BUG: est_alpha should also use this
     sig1 = (zs > 0)# sigmoid
+    
+    # compute the algrebraic weights in the paper
     w = sig1*jnp.nan_to_num(jax_stable_exp(-zs*beta_2 + beta_3*stds))+1e-20
 
+    # normalize weights
     wgt  = w.sum(0)
     div = jnp.where(wgt==0,1,wgt)
     w = w/div
 
+    # compute weighted z and normal
     init_t=  (w*jnp.nan_to_num(zs)).sum(0)
     est_norm = (projp * w[:,:,None]).sum(axis=0)
     est_norm = est_norm/jnp.linalg.norm(est_norm,axis=1,keepdims=True)
 
+    # return z, alpha, normal, and the weights
+    # weights can be used to compute color, DINO features, or any other per-Gaussian property
     return init_t,est_alpha,est_norm,w
+
 
 # this version has no hyperparameters
 # and does classic alpha compositing down z-order
