@@ -13,7 +13,9 @@ from util import DegradeLR
 from numpy import random
 from pytorch3d.io import load_objs_as_meshes
 from pytorch3d.ops import sample_farthest_points
+from pytorch3d.io.ply_io import PointcloudPlyFormat
 import torch
+from prepare_silhouette import PyPathManager
 
 
 def sfs_objective(params, true_alpha):
@@ -38,6 +40,7 @@ if __name__ == '__main__':
     parser.add_argument("--log", help="Name of logging directory", default="log/")
     parser.add_argument("--data_root", help="Root directory containing masks and poses")
     parser.add_argument("--mesh_file", help="Mesh file to use for creating silhouettes", default=None, type=str)
+    parser.add_argument("--pcd_file", help="Point cloud file to use for creating silhouettes", default=None, type=str)
     parser.add_argument("--num_mixture", help="Number of mixtures to use for fuzzy balls", default=40, type=int)
     parser.add_argument("--save_type", help="Type of data for saving fuzzy balls", default='pcd', type=str)
     parser.add_argument("--init_type", help="Type of initialization for 3D Gaussians", default="random", type=str)
@@ -76,9 +79,16 @@ if __name__ == '__main__':
     render_jit = jax.jit(fm_render.render_func_rays)
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-    # Load mesh for center & scale estimation
-    pt3d_mesh = load_objs_as_meshes([args.mesh_file], device=device)
-    verts_arr = pt3d_mesh.verts_packed().cpu().numpy()
+    # Load 3D model for center & scale estimation
+    if args.mesh_file is not None:  # Generate images from mesh
+        # Load mesh in PyTorch3D format
+        pt3d_mesh = load_objs_as_meshes([args.mesh_file], device=device)
+        verts_arr = pt3d_mesh.verts_packed().cpu().numpy()
+    else:  # Generate images from point cloud
+        pcd_ply_reader = PointcloudPlyFormat()
+        pt3d_pcd = pcd_ply_reader.read(args.pcd_file, device=device, path_manager=PyPathManager)
+        verts_arr = pt3d_pcd.points_packed().cpu().numpy()
+
     shape_scale = float(verts_arr.std(0).mean())*3
     center = np.array(verts_arr.mean(0))
 
@@ -88,7 +98,7 @@ if __name__ == '__main__':
 
     # Initialize fuzzy balls
     if args.init_type == 'surface':
-        rand_mean = sample_farthest_points(pt3d_mesh.verts_packed().unsqueeze(0), K=NUM_MIXTURE)[0]
+        rand_mean = sample_farthest_points(torch.from_numpy(verts_arr).to(device).unsqueeze(0), K=NUM_MIXTURE)[0]
         rand_mean = rand_mean.squeeze(0).cpu().numpy()
     else:
         rand_mean = center + np.random.multivariate_normal(mean=[0, 0, 0], cov=1e-2 * np.identity(3) * shape_scale, size=NUM_MIXTURE)
