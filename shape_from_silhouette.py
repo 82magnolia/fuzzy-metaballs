@@ -38,37 +38,113 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--log", help="Name of logging directory", default="log/")
-    parser.add_argument("--data_root", help="Root directory containing masks and poses")
+    parser.add_argument("--data_root", help="Root directory containing masks and poses", required=True)
     parser.add_argument("--mesh_file", help="Mesh file to use for creating silhouettes", default=None, type=str)
     parser.add_argument("--pcd_file", help="Point cloud file to use for creating silhouettes", default=None, type=str)
     parser.add_argument("--num_mixture", help="Number of mixtures to use for fuzzy balls", default=40, type=int)
     parser.add_argument("--save_type", help="Type of data for saving fuzzy balls", default='pcd', type=str)
     parser.add_argument("--init_type", help="Type of initialization for 3D Gaussians", default="random", type=str)
+    parser.add_argument("--slam_root", help="Root directory containing SLAM poses and reconstructions", default=None)
+    parser.add_argument("--resize_rate", help="Optionally resize images for faster optimization", default=1, type=int)
     args = parser.parse_args()
 
     log_dir = args.log
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
 
-    # Load silhouettes
-    sil_dir = os.path.join(args.data_root, 'sil_images')
-    sil_files = sorted(glob(os.path.join(sil_dir, '*')))
+    if args.slam_root is not None:  # Use SLAM poses
+        # Load silhouettes
+        with open(os.path.join(args.slam_root, 'images.txt'), 'r') as f:
+            sil_files = [s.strip().replace('images', 'sil_images').replace('image-', 'sil-') for s in f.readlines()]
+            sil_files = [os.path.join(args.data_root, s) for s in sil_files]
 
-    sil_list = []
-    for sil_file in sil_files:
-        sil = cv2.cvtColor(cv2.imread(sil_file), cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.
-        sil_list.append(sil)
+        sil_list = []
+        for sil_file in sil_files:
+            sil = cv2.cvtColor(cv2.imread(sil_file), cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.
+            sil = cv2.resize(sil, (sil.shape[1] // args.resize_rate, sil.shape[0] // args.resize_rate))
+            sil = np.fliplr(np.flipud(sil))  # DROID-SLAM seems to internally make image flips (this is for compensation)
+            sil_list.append(sil)
 
-    target_sil = np.stack(sil_list, axis=0)
-    image_size = [sil_list[0].shape[0], sil_list[0].shape[1]]  # (H, W)
+        target_sil = np.stack(sil_list, axis=0)
+        droid_image_size = [args.resize_rate * sil_list[0].shape[0], args.resize_rate * sil_list[0].shape[1]]  # (H, W)
+        image_size = [sil_list[0].shape[0], sil_list[0].shape[1]]  # (H, W)
 
-    # Load poses
-    pose_dir = os.path.join(args.data_root, 'sil_pose.npz')
-    pose_dict = np.load(pose_dir)
-    ndc_intrinsics = pose_dict['K']
-    focal_length = ndc_intrinsics[0][0, 0] * min(image_size[0], image_size[1]) / 2
-    cx = image_size[1] / 2 - ndc_intrinsics[0][0, 2] * min(image_size[0], image_size[1]) / 2
-    cy = image_size[0] / 2 - ndc_intrinsics[0][1, 2] * min(image_size[0], image_size[1]) / 2
+        # Load poses
+        ext_dir = os.path.join(args.slam_root, 'poses_mtx.npy')
+        int_dir = os.path.join(args.slam_root, 'intrinsics.npy')
+
+        ext_arr = np.load(ext_dir)
+        int_arr = np.load(int_dir)
+
+        ext_arr = np.linalg.inv(ext_arr)  # DROID-SLAM saves inverse poses
+        trans_arr = ext_arr[:, 0:3, 3:].squeeze(2)
+        rot_arr = np.transpose(ext_arr[:, :3, :3], (0, 2, 1))
+
+        # DROID-SLAM resize factor
+        droid_resize_rate = np.sqrt((384 * 512) / (droid_image_size[0] * droid_image_size[1]))
+        droid_mult_factor = 8.0  # DROID-SLAM divides intrinsics by 8.0
+        trans_arr *= droid_mult_factor / droid_resize_rate  # Resize translation array
+
+        focal_length = int_arr[0, 0] / droid_resize_rate * (droid_mult_factor / args.resize_rate)
+        cx = int_arr[0, 2] / droid_resize_rate * (droid_mult_factor / args.resize_rate)
+        cy = int_arr[0, 3] / droid_resize_rate * (droid_mult_factor / args.resize_rate)
+
+        height, width = image_size
+        K = np.array([[focal_length, 0, cx], [0, focal_length, cy], [0, 0, 1]])
+        pixel_list = (np.array(np.meshgrid(width - np.arange(width) - 1, height - np.arange(height) - 1, [0]))[:, :, :, 0]).reshape((3, -1)).T
+        camera_rays = (pixel_list - K[:, 2])/np.diag(K)
+        camera_rays[:, -1] = 1
+        cameras_list = []
+        for tran, rot in zip(trans_arr, rot_arr):
+            cam_center = - tran @ rot.T
+            camera_rays2 = camera_rays @ rot.T  # PyTorch3D World-Cam: X' = X @ R + T (this is inverse, cam to world)
+            t = np.tile(cam_center[None], (camera_rays2.shape[0], 1))
+
+            rays_trans = np.stack([camera_rays2, t], 1)
+
+            # TODO: Check if this is necessary (currently this is needed for things to work)
+            rays_trans = rays_trans / (droid_mult_factor / droid_resize_rate)
+
+            cameras_list.append(rays_trans)
+        cam_center = np.concatenate([cameras_list[i][:, 1] for i in range(len(cameras_list))], axis=0)
+        cam_screen = np.concatenate([cameras_list[i][:, 1] + cameras_list[i][:, 0] for i in range(len(cameras_list))], axis=0)
+    else:
+        # Load silhouettes
+        sil_dir = os.path.join(args.data_root, 'sil_images')
+        sil_files = sorted(glob(os.path.join(sil_dir, '*')))
+
+        sil_list = []
+        for sil_file in sil_files:
+            sil = cv2.cvtColor(cv2.imread(sil_file), cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.
+            sil = cv2.resize(sil, (sil.shape[1] // args.resize_rate, sil.shape[0] // args.resize_rate))
+            sil_list.append(sil)
+
+        target_sil = np.stack(sil_list, axis=0)
+        image_size = [sil_list[0].shape[0], sil_list[0].shape[1]]  # (H, W)
+
+        # Load poses
+        pose_dir = os.path.join(args.data_root, 'sil_pose.npz')
+        pose_dict = np.load(pose_dir)
+        ndc_intrinsics = pose_dict['K']
+        focal_length = ndc_intrinsics[0][0, 0] * min(image_size[0], image_size[1]) / 2
+        cx = image_size[1] / 2 - ndc_intrinsics[0][0, 2] * min(image_size[0], image_size[1]) / 2
+        cy = image_size[0] / 2 - ndc_intrinsics[0][1, 2] * min(image_size[0], image_size[1]) / 2
+
+        height, width = image_size
+        K = np.array([[focal_length, 0, cx], [0, focal_length, cy], [0, 0, 1]])
+        pixel_list = (np.array(np.meshgrid(width - np.arange(width) - 1, height - np.arange(height) - 1, [0]))[:, :, :, 0]).reshape((3, -1)).T
+        camera_rays = (pixel_list - K[:, 2])/np.diag(K)
+        camera_rays[:, -1] = 1
+        cameras_list = []
+        for tran, rot in zip(pose_dict['T'], pose_dict['R']):
+            cam_center = - tran @ rot.T
+            camera_rays2 = camera_rays @ rot.T  # PyTorch3D World-Cam: X' = X @ R + T (this is inverse, cam to world)
+            t = np.tile(cam_center[None], (camera_rays2.shape[0], 1))
+
+            rays_trans = np.stack([camera_rays2, t], 1)
+            cameras_list.append(rays_trans)
+        cam_center = np.concatenate([cameras_list[i][:, 1] for i in range(len(cameras_list))], axis=0)
+        cam_screen = np.concatenate([cameras_list[i][:, 1] + cameras_list[i][:, 0] for i in range(len(cameras_list))], axis=0)
 
     # Set hyperparameters
     hyperparams = fm_render.hyperparams
@@ -80,14 +156,20 @@ if __name__ == '__main__':
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     # Load 3D model for center & scale estimation
-    if args.mesh_file is not None:  # Generate images from mesh
-        # Load mesh in PyTorch3D format
-        pt3d_mesh = load_objs_as_meshes([args.mesh_file], device=device)
-        verts_arr = pt3d_mesh.verts_packed().cpu().numpy()
-    else:  # Generate images from point cloud
-        pcd_ply_reader = PointcloudPlyFormat()
-        pt3d_pcd = pcd_ply_reader.read(args.pcd_file, device=device, path_manager=PyPathManager)
-        verts_arr = pt3d_pcd.points_packed().cpu().numpy()
+    if args.slam_root is not None:  # Use SLAM reconstructions to initialize
+        verts_arr = np.loadtxt(os.path.join(args.slam_root, 'point_cloud.txt'))[:, :3]
+    else:
+        if args.mesh_file is not None:  # Generate images from mesh
+            # Load mesh in PyTorch3D format
+            pt3d_mesh = load_objs_as_meshes([args.mesh_file], device=device)
+            verts_arr = pt3d_mesh.verts_packed().cpu().numpy()
+        else:  # Generate images from point cloud
+            if args.pcd_file.endswith('ply'):
+                pcd_ply_reader = PointcloudPlyFormat()
+                pt3d_pcd = pcd_ply_reader.read(args.pcd_file, device=device, path_manager=PyPathManager)
+                verts_arr = pt3d_pcd.points_packed().cpu().numpy()
+            else:  # .txt ending
+                verts_arr = np.loadtxt(args.pcd_file)[:, :3]
 
     shape_scale = float(verts_arr.std(0).mean())*3
     center = np.array(verts_arr.mean(0))
@@ -106,22 +188,6 @@ if __name__ == '__main__':
     rand_weight_log = jnp.log(np.ones(NUM_MIXTURE) / NUM_MIXTURE) + jnp.log(gmm_init_scale)
     rand_sphere_size = 30
     rand_prec = jnp.array([np.identity(3) * rand_sphere_size / shape_scale for _ in range(NUM_MIXTURE)])
-
-    height, width = image_size
-    K = np.array([[focal_length, 0, cx], [0, focal_length, cy], [0, 0, 1]])
-    pixel_list = (np.array(np.meshgrid(width - np.arange(width) - 1, height - np.arange(height) - 1, [0]))[:, :, :, 0]).reshape((3, -1)).T
-    camera_rays = (pixel_list - K[:, 2])/np.diag(K)
-    camera_rays[:, -1] = 1
-    cameras_list = []
-    for tran, rot in zip(pose_dict['T'], pose_dict['R']):
-        cam_center = - tran @ rot.T
-        camera_rays2 = camera_rays @ rot.T  # PyTorch3D World-Cam: X' = X @ R + T (this is inverse, cam to world)
-        t = np.tile(cam_center[None], (camera_rays2.shape[0], 1))
-
-        rays_trans = np.stack([camera_rays2, t], 1)
-        cameras_list.append(rays_trans)
-    cam_center = np.concatenate([cameras_list[i][:, 1] for i in range(len(cameras_list))], axis=0)
-    cam_screen = np.concatenate([cameras_list[i][:, 1] + cameras_list[i][:, 0] for i in range(len(cameras_list))], axis=0)
 
     # Initial rendering
     alpha_results_rand = []
