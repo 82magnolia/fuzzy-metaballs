@@ -80,6 +80,14 @@ if __name__ == '__main__':
         trans_arr = ext_arr[:, 0:3, 3:].squeeze(2)
         rot_arr = np.transpose(ext_arr[:, :3, :3], (0, 2, 1))
 
+        """
+        Note the flipping operation above is equivalent to the following transformation (if we omit flipping)
+
+        R_convert = np.array([[-1., 0, 0], [0, -1., 0], [0, 0, 1.]])
+        rot_arr = rot_arr @ R_convert[None, ...]
+        trans_arr = trans_arr @ R_convert
+        """
+
         # DROID-SLAM resize factor
         droid_resize_rate = np.sqrt((384 * 512) / (droid_image_size[0] * droid_image_size[1]))
         droid_mult_factor = 8.0  # DROID-SLAM divides intrinsics by 8.0
