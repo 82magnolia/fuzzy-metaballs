@@ -90,12 +90,13 @@ if __name__ == '__main__':
 
         # DROID-SLAM resize factor
         droid_resize_rate = np.sqrt((384 * 512) / (droid_image_size[0] * droid_image_size[1]))
-        droid_mult_factor = 8.0  # DROID-SLAM divides intrinsics by 8.0
-        trans_arr *= droid_mult_factor / droid_resize_rate  # Resize translation array
+        droid_intrinsic_rate = 8.0  # DROID-SLAM divides intrinsics by 8.0
+        droid_mult_factor = droid_intrinsic_rate / droid_resize_rate
+        trans_arr *= droid_mult_factor  # Resize translation array
 
-        focal_length = int_arr[0, 0] / droid_resize_rate * (droid_mult_factor / args.resize_rate)
-        cx = int_arr[0, 2] / droid_resize_rate * (droid_mult_factor / args.resize_rate)
-        cy = int_arr[0, 3] / droid_resize_rate * (droid_mult_factor / args.resize_rate)
+        focal_length = int_arr[0, 0] / args.resize_rate * (droid_mult_factor)
+        cx = int_arr[0, 2] / args.resize_rate * (droid_mult_factor)
+        cy = int_arr[0, 3] / args.resize_rate * (droid_mult_factor)
 
         height, width = image_size
         K = np.array([[focal_length, 0, cx], [0, focal_length, cy], [0, 0, 1]])
@@ -109,9 +110,7 @@ if __name__ == '__main__':
             t = np.tile(cam_center[None], (camera_rays2.shape[0], 1))
 
             rays_trans = np.stack([camera_rays2, t], 1)
-
-            # TODO: Check if this is necessary (currently this is needed for things to work)
-            rays_trans = rays_trans / (droid_mult_factor / droid_resize_rate)
+            rays_trans = rays_trans / (droid_mult_factor)  # Normalization required for aligning camera_rays scale with saved translation scale
 
             cameras_list.append(rays_trans)
         cam_center = np.concatenate([cameras_list[i][:, 1] for i in range(len(cameras_list))], axis=0)
