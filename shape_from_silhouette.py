@@ -62,6 +62,8 @@ if __name__ == '__main__':
         for sil_file in sil_files:
             sil = cv2.cvtColor(cv2.imread(sil_file), cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.
             sil = cv2.resize(sil, (sil.shape[1] // args.resize_rate, sil.shape[0] // args.resize_rate))
+            sil[sil >= 0.5] = 1.  # Binarize silhouettes
+            sil[sil < 0.5] = 0.
             sil = np.fliplr(np.flipud(sil))  # Convert DROID-SLAM coordinate space to PyTorch3D coordinate space via xy-reflection
             sil_list.append(sil)
 
