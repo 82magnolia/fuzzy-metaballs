@@ -20,6 +20,7 @@ from pytorch3d.renderer import (
 from pytorch3d.renderer.cameras import look_at_view_transform
 from pytorch3d.io import load_objs_as_meshes
 from pytorch3d.io.ply_io import PointcloudPlyFormat
+from pytorch3d.renderer.mesh.textures import TexturesVertex
 import torch
 from scipy.spatial.transform import Rotation
 from scipy.spatial.transform import Slerp
@@ -73,6 +74,8 @@ if __name__ == '__main__':
     if args.mesh_file is not None:  # Generate images from mesh
         # Load mesh in PyTorch3D format
         pt3d_mesh = load_objs_as_meshes([args.mesh_file], device=device)
+        if pt3d_mesh.textures is None:
+            pt3d_mesh.textures = TexturesVertex(torch.ones_like(pt3d_mesh.verts_packed()).unsqueeze(0))
         verts_arr = pt3d_mesh.verts_packed().cpu().numpy()
     else:  # Generate images from point cloud
         pcd_ply_reader = PointcloudPlyFormat()
