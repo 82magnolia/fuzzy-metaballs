@@ -50,6 +50,7 @@ if __name__ == '__main__':
     parser.add_argument("--rand_perturb_scale", help="Scale of random perturbations to make", default=0.1, type=float)
     parser.add_argument("--add_symmetry", help="If True, additionally render the approximate point symmetry silhouette", action='store_true')
     parser.add_argument("--seed", help="Random seed to use", default=42)
+    parser.add_argument("--dist_variation", help="If True, additionally vary the distance of each camera to the object center", action="store_true")
     args = parser.parse_args()
 
     np.random.seed(args.seed)
@@ -125,6 +126,31 @@ if __name__ == '__main__':
 
     view_quats = view_quats / np.linalg.norm(view_quats, axis=1, keepdims=True)
 
+    if args.dist_variation:  # Additionally apply variations on camera distance
+        dist_mult_factor = 3.
+        if args.view_type == 'continuous':
+            num_waypoints = args.num_waypoints
+            num_view_per_wp = args.num_view_per_wp
+            waypoint_dists = np.random.randn(num_waypoints) / dist_mult_factor + 3 * shape_scale
+            waypoint_dists = np.clip(waypoint_dists, a_min=0.0, a_max=None)
+            view_dists = []
+            for idx in range(len(waypoint_dists)):
+                if idx != len(waypoint_dists) - 1:
+                    wps = waypoint_dists[idx: idx + 2]
+                else:
+                    wps = np.stack([waypoint_dists[-1], waypoint_dists[0]])
+                times = np.linspace(0, 1, num_view_per_wp)
+                key_times = np.array([0, 1])
+                lerp_dists = np.interp(times, key_times, wps)
+                view_dists.append(lerp_dists[:-1])
+            view_dists = np.concatenate(view_dists, axis=0)
+        else:
+            num_views = args.num_views
+            view_dists = np.random.randn(num_views) / dist_mult_factor + 3 * shape_scale
+            view_dists = np.clip(view_dists, a_min=0.0)
+    else:  # Fixed view distances
+        view_dists = np.ones(view_quats.shape[0]) * 3 * shape_scale
+
     # Dictionary for saving poses
     pose_dict = {'K': None, 'R': [], 'T': []}
 
@@ -189,12 +215,12 @@ if __name__ == '__main__':
     if args.add_symmetry:
         sym_pose_dict = {'R': [], 'T': []}
 
-    for q_idx, quat in tqdm(enumerate(view_quats), desc="Generating views", total=len(view_quats)):
+    for p_idx, (quat, dist) in tqdm(enumerate(zip(view_quats, view_dists)), desc="Generating views", total=len(view_quats)):
         R = transforms3d.quaternions.quat2mat(quat)
-        loc = np.array([0, 0, 3 * shape_scale]) @ R + center  # Camera center
+        loc = np.array([0, 0, dist]) @ R + center  # Camera center
 
         # Look-at rotations and translations (object-centric views)
-        cam_rot, cam_trans = look_at_view_transform(dist=3 * shape_scale, at=center.reshape(1, 3),
+        cam_rot, cam_trans = look_at_view_transform(dist=dist, at=center.reshape(1, 3),
             eye=loc.reshape(1, 3), device=device)
 
         pose = np.vstack([np.vstack([R, loc]).T, np.array([0, 0, 0, 1])])
@@ -215,13 +241,11 @@ if __name__ == '__main__':
         alpha = pt3d_render_result[0][..., 3].cpu().numpy()
         pt3d_sil = (alpha != 0.)
 
-        # TODO: Add optional hole filling
-
         pose_dict['T'].append(cam_trans.squeeze().cpu().numpy())
         pose_dict['R'].append(cam_rot.squeeze().cpu().numpy())
 
-        cv2.imwrite(os.path.join(image_dir, f'image-{q_idx:04d}.jpg'), cv2.cvtColor(images, cv2.COLOR_BGR2RGB))
-        cv2.imwrite(os.path.join(sil_image_dir, f'sil-{q_idx:04d}.jpg'), pt3d_sil.astype(np.uint8) * 255)
+        cv2.imwrite(os.path.join(image_dir, f'image-{p_idx:04d}.jpg'), cv2.cvtColor(images, cv2.COLOR_BGR2RGB))
+        cv2.imwrite(os.path.join(sil_image_dir, f'sil-{p_idx:04d}.jpg'), pt3d_sil.astype(np.uint8) * 255)
 
         if args.add_symmetry:  # Add 180-deg rotation on z-axis (opposite facing camera)
             Rz = np.array([[-1., 0., 0.], [0., 1., 0.], [0., 0., -1.]])
@@ -233,8 +257,8 @@ if __name__ == '__main__':
             sym_images = np.flip(images, axis=1)
             sym_sil = np.flip(pt3d_sil, axis=1)
 
-            cv2.imwrite(os.path.join(image_dir, f'image-{len(view_quats) + q_idx:04d}.jpg'), cv2.cvtColor(sym_images, cv2.COLOR_BGR2RGB))
-            cv2.imwrite(os.path.join(sil_image_dir, f'sil-{len(view_quats) + q_idx:04d}.jpg'), sym_sil.astype(np.uint8) * 255)
+            cv2.imwrite(os.path.join(image_dir, f'image-{len(view_quats) + p_idx:04d}.jpg'), cv2.cvtColor(sym_images, cv2.COLOR_BGR2RGB))
+            cv2.imwrite(os.path.join(sil_image_dir, f'sil-{len(view_quats) + p_idx:04d}.jpg'), sym_sil.astype(np.uint8) * 255)
 
     if args.add_symmetry:
         pose_dict['R'] = np.stack(pose_dict['R'] + sym_pose_dict['R'], axis=0)
