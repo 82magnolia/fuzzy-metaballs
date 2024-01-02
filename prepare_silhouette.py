@@ -51,6 +51,7 @@ if __name__ == '__main__':
     parser.add_argument("--add_symmetry", help="If True, additionally render the approximate point symmetry silhouette", action='store_true')
     parser.add_argument("--seed", help="Random seed to use", default=42)
     parser.add_argument("--dist_variation", help="If True, additionally vary the distance of each camera to the object center", action="store_true")
+    parser.add_argument("--dist_mult_factor", help="Multiplication factor for scaling distances if dist_variation is True", default=3., type=float)
     args = parser.parse_args()
 
     np.random.seed(args.seed)
@@ -127,11 +128,10 @@ if __name__ == '__main__':
     view_quats = view_quats / np.linalg.norm(view_quats, axis=1, keepdims=True)
 
     if args.dist_variation:  # Additionally apply variations on camera distance
-        dist_mult_factor = 3.
         if args.view_type == 'continuous':
             num_waypoints = args.num_waypoints
             num_view_per_wp = args.num_view_per_wp
-            waypoint_dists = np.random.randn(num_waypoints) / dist_mult_factor + 3 * shape_scale
+            waypoint_dists = np.random.randn(num_waypoints) / args.dist_mult_factor + 3 * shape_scale
             waypoint_dists = np.clip(waypoint_dists, a_min=0.0, a_max=None)
             view_dists = []
             for idx in range(len(waypoint_dists)):
@@ -146,7 +146,7 @@ if __name__ == '__main__':
             view_dists = np.concatenate(view_dists, axis=0)
         else:
             num_views = args.num_views
-            view_dists = np.random.randn(num_views) / dist_mult_factor + 3 * shape_scale
+            view_dists = np.random.randn(num_views) / args.dist_mult_factor + 3 * shape_scale
             view_dists = np.clip(view_dists, a_min=0.0)
     else:  # Fixed view distances
         view_dists = np.ones(view_quats.shape[0]) * 3 * shape_scale
