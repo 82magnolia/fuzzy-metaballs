@@ -21,6 +21,7 @@ from pytorch3d.renderer.cameras import look_at_view_transform
 from pytorch3d.io import load_objs_as_meshes
 from pytorch3d.io.ply_io import PointcloudPlyFormat
 from pytorch3d.renderer.mesh.textures import TexturesVertex
+from pytorch3d.structures import Pointclouds
 import torch
 from scipy.spatial.transform import Rotation
 from scipy.spatial.transform import Slerp
@@ -78,8 +79,18 @@ if __name__ == '__main__':
             pt3d_mesh.textures = TexturesVertex(torch.ones_like(pt3d_mesh.verts_packed()).unsqueeze(0))
         verts_arr = pt3d_mesh.verts_packed().cpu().numpy()
     else:  # Generate images from point cloud
-        pcd_ply_reader = PointcloudPlyFormat()
-        pt3d_pcd = pcd_ply_reader.read(args.pcd_file, device=device, path_manager=PyPathManager)
+        if args.pcd_file.endswith('ply'):
+            pcd_ply_reader = PointcloudPlyFormat()
+            pt3d_pcd = pcd_ply_reader.read(args.pcd_file, device=device, path_manager=PyPathManager)
+        else:  # .txt extension
+            np_pcd = np.loadtxt(args.pcd_file)
+            verts = torch.tensor(np_pcd[:, :3], device=device, dtype=torch.float)
+            if np_pcd[:, 3:].max() > 1.:  # Auto-detect [0, 255] range
+                rgb = torch.tensor(np_pcd[:, 3:], device=device, dtype=torch.float) / 255.
+            else:
+                rgb = torch.tensor(np_pcd[:, 3:], device=device, dtype=torch.float)
+            pt3d_pcd = Pointclouds(points=[verts], features=[rgb])
+
         verts_arr = pt3d_pcd.points_packed().cpu().numpy()
 
         # Add alpha channel
