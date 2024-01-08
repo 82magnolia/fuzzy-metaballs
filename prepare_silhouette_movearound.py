@@ -332,7 +332,7 @@ if __name__ == '__main__':
         # Poses
         pose_dict['R'] = np.stack(pose_dict['R'], axis=0)
         pose_dict['T'] = np.stack(pose_dict['T'], axis=0)
-        np.savez(os.path.join(log_dir, 'sil_pose.npz'), **pose_dict)
+        np.savez(os.path.join(log_dir, 'pose.npz'), **pose_dict)
 
         # Images and Video
         size = (img_list[0].shape[1], img_list[0].shape[0])
