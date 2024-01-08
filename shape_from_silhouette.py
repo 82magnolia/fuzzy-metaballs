@@ -60,18 +60,34 @@ if __name__ == '__main__':
             sil_files = [s.strip().replace('images', 'sil_images').replace('image-', 'sil-') for s in f.readlines()]
             sil_files = [os.path.join(args.data_root, s) for s in sil_files]
 
-        sil_list = []
-        for sil_file in sil_files:
-            sil = cv2.cvtColor(cv2.imread(sil_file), cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.
-            sil = cv2.resize(sil, (sil.shape[1] // args.resize_rate, sil.shape[0] // args.resize_rate))
-            sil[sil >= 0.5] = 1.  # Binarize silhouettes
-            sil[sil < 0.5] = 0.
+        sil_dict = {}
+        sil_sc_dict = {sil_idx: [] for sil_idx in range(len(sil_files))}  # Object classes present per each silhouette 
+        image_size = None
+        valid_thres = 0.05  # Threshold number of segment pixels to be considered valid
+        for sil_idx, sil_file in enumerate(sil_files):
+            sil = cv2.cvtColor(cv2.imread(sil_file), cv2.COLOR_BGR2GRAY)
             sil = np.fliplr(np.flipud(sil))  # Convert DROID-SLAM coordinate space to PyTorch3D coordinate space via xy-reflection
-            sil_list.append(sil)
+            sil_classes = np.unique(sil[sil != 0])
 
-        target_sil = np.stack(sil_list, axis=0)
-        droid_image_size = [args.resize_rate * sil_list[0].shape[0], args.resize_rate * sil_list[0].shape[1]]  # (H, W)
-        image_size = [sil_list[0].shape[0], sil_list[0].shape[1]]  # (H, W)
+            for sc in sil_classes:
+                obj_sil = (sil == sc)
+                if obj_sil.sum() / (obj_sil.shape[0] * obj_sil.shape[1]) >= valid_thres:
+                    if sc not in sil_dict.keys():
+                        sil_dict[sc] = []
+                        sil_sc_dict[sc] = []
+
+                    obj_sil = obj_sil.astype(np.float32)
+                    obj_sil = cv2.resize(obj_sil, (obj_sil.shape[1] // args.resize_rate, obj_sil.shape[0] // args.resize_rate))
+                    obj_sil[obj_sil >= 0.5] = 1.  # Binarize silhouettes
+                    obj_sil[obj_sil < 0.5] = 0.
+                    sil_dict[sc].append(obj_sil)
+                    sil_sc_dict[sil_idx].append(sc)
+
+                    if image_size is None:  # Set image_size
+                        image_size = [obj_sil.shape[0], obj_sil.shape[1]]
+
+        target_sil_dict = {sc: np.stack(sil_dict[sc], axis=0) for sc in sil_dict.keys()}
+        droid_image_size = [args.resize_rate * image_size[0], args.resize_rate * image_size[1]]  # (H, W)
 
         # Load poses
         ext_dir = os.path.join(args.slam_root, 'poses_mtx.npy')
@@ -107,8 +123,8 @@ if __name__ == '__main__':
         pixel_list = (np.array(np.meshgrid(width - np.arange(width) - 1, height - np.arange(height) - 1, [0]))[:, :, :, 0]).reshape((3, -1)).T
         camera_rays = (pixel_list - K[:, 2])/np.diag(K)
         camera_rays[:, -1] = 1
-        cameras_list = []
-        for tran, rot in zip(trans_arr, rot_arr):
+        cameras_dict = {sc: [] for sc in sil_dict.keys()}
+        for pose_idx, (tran, rot) in enumerate(zip(trans_arr, rot_arr)):
             cam_center = - tran @ rot.T
             camera_rays2 = camera_rays @ rot.T  # PyTorch3D World-Cam: X' = X @ R + T (this is inverse, cam to world)
             t = np.tile(cam_center[None], (camera_rays2.shape[0], 1))
@@ -116,9 +132,10 @@ if __name__ == '__main__':
             rays_trans = np.stack([camera_rays2, t], 1)
             rays_trans = rays_trans / (droid_mult_factor)  # Normalization required for aligning camera_rays scale with saved translation scale
 
-            cameras_list.append(rays_trans)
-        cam_center = np.concatenate([cameras_list[i][:, 1] for i in range(len(cameras_list))], axis=0)
-        cam_screen = np.concatenate([cameras_list[i][:, 1] + cameras_list[i][:, 0] for i in range(len(cameras_list))], axis=0)
+            for sc in sil_sc_dict[pose_idx]:
+                cameras_dict[sc].append(rays_trans)
+        cam_center_dict = {sc: np.concatenate([cameras_dict[sc][i][:, 1] for i in range(len(cameras_dict[sc]))], axis=0) for sc in sil_dict.keys()}
+        cam_screen_dict = {sc: np.concatenate([cameras_dict[sc][i][:, 1] + cameras_dict[sc][i][:, 0] for i in range(len(cameras_dict[sc]))], axis=0) for sc in sil_dict.keys()}
     else:
         # Load silhouettes
         sil_dir = os.path.join(args.data_root, 'sil_images')
@@ -193,7 +210,16 @@ if __name__ == '__main__':
 
         # Load 3D model for center & scale estimation
         if args.slam_root is not None:  # Use SLAM reconstructions to initialize
-            verts_arr = np.loadtxt(os.path.join(args.slam_root, 'point_cloud.txt'))[:, :3]
+            # Assume object point cloud files to be in the form of "XXXXX_ID.txt" for object with index number ID
+            pcd_files = sorted(glob(os.path.join(args.slam_root, "*.txt")))
+            pcd_file = [m for m in pcd_files if m.strip('.txt').split('_')[-1] == str(sc)]
+
+            if len(pcd_file) != 0:  # 3D file found for the designated index
+                pcd_file = pcd_file[0]
+            else:
+                f"No point cloud found for object index {sc}"
+                continue
+            verts_arr = np.loadtxt(pcd_file)[:, :3]
         else:
             # Note only one of mesh_file, pcd_file, mesh_root, pcd_root should be given as input
             if args.mesh_file is not None:  # Generate images from mesh
@@ -219,7 +245,7 @@ if __name__ == '__main__':
                 pt3d_mesh = load_objs_as_meshes([mesh_file], device=device)
                 verts_arr = pt3d_mesh.verts_packed().cpu().numpy()                
             elif args.pcd_root is not None:
-                # Assume object mesh files to be in the form of "XXXXX_ID.txt" for object with index number ID
+                # Assume object point cloud files to be in the form of "XXXXX_ID.txt" for object with index number ID
                 pcd_files = sorted(glob(os.path.join(args.pcd_root, "*.txt")))
                 pcd_file = [m for m in pcd_files if m.strip('.txt').split('_')[-1] == str(sc)]
 
@@ -227,6 +253,7 @@ if __name__ == '__main__':
                     pcd_file = pcd_file[0]
                 else:
                     f"No point cloud found for object index {sc}"
+                    continue
                 verts_arr = np.loadtxt(pcd_file)[:, :3]
             else:
                 raise ValueError("No reasonable 3D structures provided for initialization")
