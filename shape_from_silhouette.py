@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import fm_render
 from jax.example_libraries import optimizers
-from util import DegradeLR
+from util import DegradeLR, icosahedron2sphere
 from numpy import random
 from pytorch3d.io import load_objs_as_meshes
 from pytorch3d.ops import sample_farthest_points
@@ -44,7 +44,7 @@ if __name__ == '__main__':
     parser.add_argument("--pcd_file", help="Point cloud file to use for creating silhouettes", default=None, type=str)
     parser.add_argument("--pcd_root", help="Root directory containing point cloud files to use for creating silhouettes (used for multi-object fitting)", default=None, type=str)
     parser.add_argument("--num_mixture", help="Number of mixtures to use for fuzzy balls", default=40, type=int)
-    parser.add_argument("--save_type", help="Type of data for saving fuzzy balls", default='pcd', type=str)
+    parser.add_argument("--save_type", help="Type of data for saving fuzzy balls", default='ellipsoid_pcd', type=str)
     parser.add_argument("--init_type", help="Type of initialization for 3D Gaussians", default="random", type=str)
     parser.add_argument("--slam_root", help="Root directory containing SLAM poses and reconstructions", default=None)
     parser.add_argument("--resize_rate", help="Optionally resize images for faster optimization", default=1, type=int)
@@ -352,3 +352,45 @@ if __name__ == '__main__':
             pcd = np.concatenate([points, colors], axis=1)
 
             np.savetxt(os.path.join(log_dir, f'gaussians_{sc}.txt'), pcd)
+        elif args.save_type == 'ellipsoid_pcd':
+            points_list = []
+            colors_list = []
+            sphere_level = 3
+            kappa = 5  # x^2 + y^2 + z^2 = kappa
+            sphere_pts, _ = icosahedron2sphere(sphere_level)
+            num_pts = sphere_pts.shape[0]
+
+            for idx in range(len(final_mean)):
+                if final_weight_log[idx] > 0:  # final_weight_log keeps valid balls
+                    prec = final_prec[idx]  # Sigma^-1 = prec^T prec
+                    ellipsoid_pts = np.sqrt(kappa) * sphere_pts @ np.linalg.inv(prec).T + final_mean[idx][None, :]
+                    points_list.append(ellipsoid_pts)
+                    colors = np.stack([np.random.rand(3)] * num_pts, axis=0)
+                    colors_list.append(colors)
+
+            points = np.concatenate(points_list, axis=0)
+            colors = np.concatenate(colors_list, axis=0)
+            pcd = np.concatenate([points, colors], axis=1)
+
+            np.savetxt(os.path.join(log_dir, f'gaussians_{sc}.txt'), pcd)
+        elif args.save_type == 'ellipsoid_mesh':
+            points_list = []
+            colors_list = []
+            sphere_level = 3
+            kappa = 5  # x^2 + y^2 + z^2 = kappa
+            sphere_pts, sphere_faces = icosahedron2sphere(sphere_level)
+            num_pts = sphere_pts.shape[0]
+            num_faces = sphere_faces.shape[0]
+            mesh_list = []
+
+            for idx in range(len(final_mean)):
+                if final_weight_log[idx] > 0:  # final_weight_log keeps valid balls
+                    prec = final_prec[idx]  # Sigma^-1 = prec^T prec
+                    ellipsoid_pts = np.sqrt(kappa) * sphere_pts @ np.linalg.inv(prec).T + final_mean[idx][None, :]
+                    colors = np.stack([np.random.rand(3)] * num_faces, axis=0)
+                    colors = np.concatenate([colors, np.ones_like(colors[:, 0:1])], axis=-1)
+                    colors = (colors * 255).astype(np.uint8)
+                    ellipsoid_mesh = trimesh.Trimesh(vertices=ellipsoid_pts, faces=sphere_faces, face_colors=colors)
+                    mesh_list.append(ellipsoid_mesh)
+            full_mesh = trimesh.util.concatenate(mesh_list)
+            full_mesh.export(os.path.join(log_dir, f'gaussians_{sc}.obj'))
