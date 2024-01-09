@@ -9,13 +9,15 @@ import jax
 import jax.numpy as jnp
 import fm_render
 from jax.example_libraries import optimizers
-from util import DegradeLR, icosahedron2sphere
+from util import DegradeLR
 from numpy import random
 from pytorch3d.io import load_objs_as_meshes
 from pytorch3d.ops import sample_farthest_points
 from pytorch3d.io.ply_io import PointcloudPlyFormat
 import torch
 from prepare_silhouette import PyPathManager
+import open3d as o3d
+from trimesh.creation import icosphere
 
 
 def sfs_objective(params, true_alpha):
@@ -44,7 +46,7 @@ if __name__ == '__main__':
     parser.add_argument("--pcd_file", help="Point cloud file to use for creating silhouettes", default=None, type=str)
     parser.add_argument("--pcd_root", help="Root directory containing point cloud files to use for creating silhouettes (used for multi-object fitting)", default=None, type=str)
     parser.add_argument("--num_mixture", help="Number of mixtures to use for fuzzy balls", default=40, type=int)
-    parser.add_argument("--save_type", help="Type of data for saving fuzzy balls", default='ellipsoid_pcd', type=str)
+    parser.add_argument("--save_type", help="Type of data for saving fuzzy balls", default='ellipsoid_mesh', type=str)
     parser.add_argument("--init_type", help="Type of initialization for 3D Gaussians", default="random", type=str)
     parser.add_argument("--slam_root", help="Root directory containing SLAM poses and reconstructions", default=None)
     parser.add_argument("--resize_rate", help="Optionally resize images for faster optimization", default=1, type=int)
@@ -349,9 +351,10 @@ if __name__ == '__main__':
                     colors_list.append(colors)
             points = np.concatenate(points_list, axis=0)
             colors = np.concatenate(colors_list, axis=0)
-            pcd = np.concatenate([points, colors], axis=1)
-
-            np.savetxt(os.path.join(log_dir, f'gaussians_{sc}.txt'), pcd)
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(points)
+            pcd.colors = o3d.utility.Vector3dVector(colors)
+            o3d.io.write_point_cloud(os.path.join(log_dir, f'gaussians_{sc}.ply'), pcd)
         elif args.save_type == 'ellipsoid_pcd':
             points_list = []
             colors_list = []
@@ -370,15 +373,18 @@ if __name__ == '__main__':
 
             points = np.concatenate(points_list, axis=0)
             colors = np.concatenate(colors_list, axis=0)
-            pcd = np.concatenate([points, colors], axis=1)
-
-            np.savetxt(os.path.join(log_dir, f'gaussians_{sc}.txt'), pcd)
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(points)
+            pcd.colors = o3d.utility.Vector3dVector(colors)
+            o3d.io.write_point_cloud(os.path.join(log_dir, f'gaussians_{sc}.ply'), pcd)
         elif args.save_type == 'ellipsoid_mesh':
             points_list = []
             colors_list = []
             sphere_level = 3
             kappa = 5  # x^2 + y^2 + z^2 = kappa
-            sphere_pts, sphere_faces = icosahedron2sphere(sphere_level)
+            sphere_mesh = icosphere(subdivisions=3)  # Icosphere with correct faces
+            sphere_pts = sphere_mesh.vertices
+            sphere_faces = sphere_mesh.faces
             num_pts = sphere_pts.shape[0]
             num_faces = sphere_faces.shape[0]
             mesh_list = []
@@ -393,4 +399,12 @@ if __name__ == '__main__':
                     ellipsoid_mesh = trimesh.Trimesh(vertices=ellipsoid_pts, faces=sphere_faces, face_colors=colors)
                     mesh_list.append(ellipsoid_mesh)
             full_mesh = trimesh.util.concatenate(mesh_list)
-            full_mesh.export(os.path.join(log_dir, f'gaussians_{sc}.obj'))
+
+            # The following saving scheme works with CloudCompare
+            o3d_colors = (full_mesh.visual.vertex_colors[:, :3]).astype(np.float64) / 255.
+            o3d_full_mesh = o3d.geometry.TriangleMesh()
+            o3d_full_mesh.vertices = o3d.utility.Vector3dVector(full_mesh.vertices)
+            o3d_full_mesh.vertex_colors = o3d.utility.Vector3dVector(o3d_colors)
+            o3d_full_mesh.triangles = o3d.utility.Vector3iVector(full_mesh.faces)
+            o3d_full_mesh.compute_vertex_normals()
+            o3d.io.write_triangle_mesh(os.path.join(log_dir, f'gaussians_{sc}.ply'), o3d_full_mesh, write_vertex_normals=True)
